@@ -425,7 +425,7 @@ class IndexTTS2:
             audio = audio[:, :max_audio_samples]
         return audio, sr
     
-    def normalize_emo_vec(self, emo_vector, apply_bias=True):
+    def normalize_emo_vec(self, emo_vector, apply_bias=True, max_emotion_sum=0.8):
         # apply biased emotion factors for better user experience,
         # by de-emphasizing emotions that can cause strange results
         if apply_bias:
@@ -433,10 +433,10 @@ class IndexTTS2:
             emo_bias = [0.9375, 0.875, 1.0, 1.0, 0.9375, 0.9375, 0.6875, 0.5625]
             emo_vector = [vec * bias for vec, bias in zip(emo_vector, emo_bias)]
 
-        # the total emotion sum must be 0.8 or less
+        # the total emotion sum must be max_emotion_sum or less
         emo_sum = sum(emo_vector)
-        if emo_sum > 0.8:
-            scale_factor = 0.8 / emo_sum
+        if emo_sum > max_emotion_sum:
+            scale_factor = max_emotion_sum / emo_sum
             emo_vector = [vec * scale_factor for vec in emo_vector]
 
         return emo_vector
@@ -477,7 +477,12 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120,
+              diffusion_steps=25, inference_cfg_rate=0.7,
+              max_speaker_audio_length=15, max_emotion_audio_length=15,
+              autoregressive_batch_size=1, max_emotion_sum=0.8,
+              latent_multiplier=1.72, max_consecutive_silence=30,
+              **generation_kwargs):
         # Load models on first use
         if not self.models_loaded:
             self._set_gr_progress(0, "Loading models for first synthesis...")
@@ -549,7 +554,7 @@ class IndexTTS2:
                 self.cache_s2mel_prompt = None
                 self.cache_mel = None
                 torch.cuda.empty_cache()
-            audio,sr = self._load_and_cut_audio(spk_audio_prompt,15,verbose)
+            audio,sr = self._load_and_cut_audio(spk_audio_prompt,max_speaker_audio_length,verbose)
             audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
             audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
 
@@ -632,7 +637,7 @@ class IndexTTS2:
             if self.cache_emo_cond is not None:
                 self.cache_emo_cond = None
                 torch.cuda.empty_cache()
-            emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt,15,verbose,sr=16000)
+            emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt,max_emotion_audio_length,verbose,sr=16000)
             emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
             emo_input_features = emo_inputs["input_features"]
             emo_attention_mask = emo_inputs["attention_mask"]
@@ -658,7 +663,7 @@ class IndexTTS2:
         top_p = generation_kwargs.pop("top_p", 0.8)
         top_k = generation_kwargs.pop("top_k", 30)
         temperature = generation_kwargs.pop("temperature", 0.8)
-        autoregressive_batch_size = 1
+        # autoregressive_batch_size passed as parameter now
         length_penalty = generation_kwargs.pop("length_penalty", 0.0)
         num_beams = generation_kwargs.pop("num_beams", 3)
         repetition_penalty = generation_kwargs.pop("repetition_penalty", 10.0)
@@ -782,8 +787,7 @@ class IndexTTS2:
                 dtype = None
                 with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
                     m_start_time = time.perf_counter()
-                    diffusion_steps = 25
-                    inference_cfg_rate = 0.7
+                    # diffusion_steps and inference_cfg_rate now passed as parameters
 
                     # Move s2mel and semantic_codec to device in hybrid mode
                     if self.hybrid_model_device:
@@ -795,7 +799,7 @@ class IndexTTS2:
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
                     S_infer = S_infer.transpose(1, 2)
                     S_infer = S_infer + latent
-                    target_lengths = (code_lens * 1.72).long()
+                    target_lengths = (code_lens * latent_multiplier).long()
 
                     cond = self.s2mel.models['length_regulator'](S_infer,
                                                                  ylens=target_lengths,
