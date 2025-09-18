@@ -66,6 +66,7 @@ dependencies = [
 # To install the WebUI support, use `uv sync --extra webui` (or `--all-extras`).
 webui = [
   "gradio==5.45.0",
+  "pydub>=0.25.1",
 ]
 # To install the DeepSpeed support, use `uv sync --extra deepspeed` (or `--all-extras`).
 deepspeed = [

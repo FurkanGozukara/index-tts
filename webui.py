@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+import glob
 
 import warnings
 
@@ -64,60 +65,102 @@ LANGUAGES = {
     "中文": "zh_CN",
     "English": "en_US"
 }
-EMO_CHOICES_ALL = [i18n("与音色参考音频相同"),
-                i18n("使用情感参考音频"),
-                i18n("使用情感向量控制"),
-                i18n("使用情感描述文本控制")]
-EMO_CHOICES_OFFICIAL = EMO_CHOICES_ALL[:-1]  # skip experimental features
+EMO_CHOICES_ALL = ["Same as speaker voice",
+                "Use emotion reference audio",
+                "Use emotion vector control",
+                "Use emotion text description"]
 
 os.makedirs("outputs/tasks",exist_ok=True)
 os.makedirs("prompts",exist_ok=True)
 
 MAX_LENGTH_TO_USE_SPEED = 70
-example_cases = []
-with open("examples/cases.jsonl", "r", encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line:
+
+# Try to import pydub for MP3 export
+try:
+    from pydub import AudioSegment
+    MP3_AVAILABLE = True
+except ImportError:
+    MP3_AVAILABLE = False
+    print("Warning: pydub not installed. MP3 export will not be available.")
+    print("To enable MP3 export, install pydub: pip install pydub")
+
+def get_next_file_number(output_dir="outputs", target_folder=None, prefix=""):
+    """Get the next available file number in sequence."""
+    if target_folder:
+        output_dir = target_folder
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Find all existing files with our naming pattern
+    existing_files = glob.glob(os.path.join(output_dir, f"{prefix}[0-9][0-9][0-9][0-9].*"))
+
+    if not existing_files:
+        return 1
+
+    # Extract numbers from filenames
+    numbers = []
+    for filepath in existing_files:
+        filename = os.path.basename(filepath)
+        # Remove prefix if present
+        if prefix:
+            filename = filename[len(prefix):]
+        # Extract the 4-digit number
+        try:
+            num_str = filename[:4]
+            if num_str.isdigit():
+                numbers.append(int(num_str))
+        except:
             continue
-        example = json.loads(line)
-        if example.get("emo_audio",None):
-            emo_audio_path = os.path.join("examples",example["emo_audio"])
-        else:
-            emo_audio_path = None
 
-        example_cases.append([os.path.join("examples", example.get("prompt_audio", "sample_prompt.wav")),
-                              EMO_CHOICES_ALL[example.get("emo_mode",0)],
-                              example.get("text"),
-                             emo_audio_path,
-                             example.get("emo_weight",1.0),
-                             example.get("emo_text",""),
-                             example.get("emo_vec_1",0),
-                             example.get("emo_vec_2",0),
-                             example.get("emo_vec_3",0),
-                             example.get("emo_vec_4",0),
-                             example.get("emo_vec_5",0),
-                             example.get("emo_vec_6",0),
-                             example.get("emo_vec_7",0),
-                             example.get("emo_vec_8",0),
-                             ])
+    if numbers:
+        return max(numbers) + 1
+    else:
+        return 1
 
-def get_example_cases(include_experimental = False):
-    if include_experimental:
-        return example_cases  # show every example
+def generate_output_path(target_folder=None, filename=None, save_as_mp3=False, prefix=""):
+    """Generate output file path with sequential numbering."""
+    output_dir = target_folder if target_folder else "outputs"
+    os.makedirs(output_dir, exist_ok=True)
 
-    # exclude emotion control mode 3 (emotion from text description)
-    return [x for x in example_cases if x[1] != EMO_CHOICES_ALL[3]]
+    if filename:
+        # Use provided filename
+        extension = ".mp3" if save_as_mp3 and MP3_AVAILABLE else ".wav"
+        if not filename.endswith(('.wav', '.mp3')):
+            filename = filename + extension
+        return os.path.join(output_dir, filename)
+    else:
+        # Use sequential numbering
+        next_num = get_next_file_number(output_dir, target_folder, prefix)
+        extension = ".mp3" if save_as_mp3 and MP3_AVAILABLE else ".wav"
+        filename = f"{prefix}{next_num:04d}{extension}"
+        return os.path.join(output_dir, filename)
+
+def convert_wav_to_mp3(wav_path, mp3_path, bitrate="256k"):
+    """Convert WAV file to MP3 using pydub."""
+    if not MP3_AVAILABLE:
+        print("Warning: MP3 conversion not available. Keeping WAV format.")
+        return wav_path
+
+    try:
+        audio = AudioSegment.from_wav(wav_path)
+        audio.export(mp3_path, format="mp3", bitrate=bitrate)
+        # Remove the original WAV file
+        os.remove(wav_path)
+        return mp3_path
+    except Exception as e:
+        print(f"Error converting to MP3: {e}")
+        return wav_path
 
 def gen_single(emo_control_method,prompt, text,
                emo_ref_path, emo_weight,
                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                emo_text,emo_random,
                max_text_tokens_per_segment=120,
+               save_as_mp3=False,
                 *args, progress=gr.Progress()):
-    output_path = None
-    if not output_path:
-        output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
+    # Generate output path with sequential numbering
+    temp_wav_path = generate_output_path(save_as_mp3=False)  # Always generate WAV first
+    output_path = temp_wav_path
     # set gradio progress
     tts.gr_progress = progress
     do_sample, top_p, top_k, temperature, \
@@ -164,98 +207,85 @@ def gen_single(emo_control_method,prompt, text,
                        verbose=cmd_args.verbose,
                        max_text_tokens_per_segment=int(max_text_tokens_per_segment),
                        **kwargs)
+
+    # Convert to MP3 if requested
+    if save_as_mp3 and MP3_AVAILABLE:
+        mp3_path = output.replace('.wav', '.mp3')
+        output = convert_wav_to_mp3(output, mp3_path)
+
     return gr.update(value=output,visible=True)
 
 def update_prompt_audio():
     update_button = gr.update(interactive=True)
     return update_button
 
-def create_warning_message(warning_text):
-    return gr.HTML(f"<div style=\"padding: 0.5em 0.8em; border-radius: 0.5em; background: #ffa87d; color: #000; font-weight: bold\">{html.escape(warning_text)}</div>")
-
-def create_experimental_warning_message():
-    return create_warning_message(i18n('提示：此功能为实验版，结果尚不稳定，我们正在持续优化中。'))
 
 with gr.Blocks(title="IndexTTS Demo") as demo:
     mutex = threading.Lock()
     gr.HTML('''
-    <h2><center>IndexTTS2: A Breakthrough in Emotionally Expressive and Duration-Controlled Auto-Regressive Zero-Shot Text-to-Speech</h2>
-<p align="center">
-<a href='https://arxiv.org/abs/2506.21619'><img src='https://img.shields.io/badge/ArXiv-2506.21619-red'></a>
-</p>
+    <h2><center>SECourses Index TTS2 Premium App : <a href="https://www.patreon.com/c/SECourses" target="_blank">https://www.patreon.com/c/SECourses</a></h2>
     ''')
 
-    with gr.Tab(i18n("音频生成")):
+    with gr.Tab("Audio Generation"):
         with gr.Row():
             os.makedirs("prompts",exist_ok=True)
-            prompt_audio = gr.Audio(label=i18n("音色参考音频"),key="prompt_audio",
+            prompt_audio = gr.Audio(label="Speaker Reference Audio",key="prompt_audio",
                                     sources=["upload","microphone"],type="filepath")
             prompt_list = os.listdir("prompts")
             default = ''
             if prompt_list:
                 default = prompt_list[0]
             with gr.Column():
-                input_text_single = gr.TextArea(label=i18n("文本"),key="input_text_single", placeholder=i18n("请输入目标文本"), info=f"{i18n('当前模型版本')}{tts.model_version or '1.0'}")
-                gen_button = gr.Button(i18n("生成语音"), key="gen_button",interactive=True)
-            output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio")
+                input_text_single = gr.TextArea(label="Text",key="input_text_single", placeholder="Enter target text", info=f"Current model version: {tts.model_version or '1.0'}")
+                gen_button = gr.Button("Generate Speech", key="gen_button",interactive=True)
+            output_audio = gr.Audio(label="Generated Result", visible=True,key="output_audio")
 
-        experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=False)
-
-        with gr.Accordion(i18n("功能设置")):
-            # 情感控制选项部分
+        with gr.Accordion("Function Settings"):
+            # 情感控制选项部分 - now showing ALL options including experimental
             with gr.Row():
                 emo_control_method = gr.Radio(
-                    choices=EMO_CHOICES_OFFICIAL,
-                    type="index",
-                    value=EMO_CHOICES_OFFICIAL[0],label=i18n("情感控制方式"))
-                # we MUST have an extra, INVISIBLE list of *all* emotion control
-                # methods so that gr.Dataset() can fetch ALL control mode labels!
-                # otherwise, the gr.Dataset()'s experimental labels would be empty!
-                emo_control_method_all = gr.Radio(
                     choices=EMO_CHOICES_ALL,
                     type="index",
-                    value=EMO_CHOICES_ALL[0], label=i18n("情感控制方式"),
-                    visible=False)  # do not render
+                    value=EMO_CHOICES_ALL[0],label="Emotion Control Method")
         # 情感参考音频部分
         with gr.Group(visible=False) as emotion_reference_group:
             with gr.Row():
-                emo_upload = gr.Audio(label=i18n("上传情感参考音频"), type="filepath")
+                emo_upload = gr.Audio(label="Upload Emotion Reference Audio", type="filepath")
 
         # 情感随机采样
         with gr.Row(visible=False) as emotion_randomize_group:
-            emo_random = gr.Checkbox(label=i18n("情感随机采样"), value=False)
+            emo_random = gr.Checkbox(label="Random Emotion Sampling", value=False)
 
         # 情感向量控制部分
         with gr.Group(visible=False) as emotion_vector_group:
             with gr.Row():
                 with gr.Column():
-                    vec1 = gr.Slider(label=i18n("喜"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec2 = gr.Slider(label=i18n("怒"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec3 = gr.Slider(label=i18n("哀"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec4 = gr.Slider(label=i18n("惧"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec1 = gr.Slider(label="Joy", minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec2 = gr.Slider(label="Anger", minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec3 = gr.Slider(label="Sadness", minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec4 = gr.Slider(label="Fear", minimum=0.0, maximum=1.0, value=0.0, step=0.05)
                 with gr.Column():
-                    vec5 = gr.Slider(label=i18n("厌恶"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec6 = gr.Slider(label=i18n("低落"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec7 = gr.Slider(label=i18n("惊喜"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec8 = gr.Slider(label=i18n("平静"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec5 = gr.Slider(label="Disgust", minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec6 = gr.Slider(label="Depression", minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec7 = gr.Slider(label="Surprise", minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec8 = gr.Slider(label="Calm", minimum=0.0, maximum=1.0, value=0.0, step=0.05)
 
         with gr.Group(visible=False) as emo_text_group:
-            create_experimental_warning_message()
             with gr.Row():
-                emo_text = gr.Textbox(label=i18n("情感描述文本"),
-                                      placeholder=i18n("请输入情绪描述（或留空以自动使用目标文本作为情绪描述）"),
+                emo_text = gr.Textbox(label="Emotion Description Text",
+                                      placeholder="Enter emotion description (or leave empty to automatically use target text as emotion description)",
                                       value="",
-                                      info=i18n("例如：委屈巴巴、危险在悄悄逼近"))
+                                      info="e.g.: feeling wronged, danger is approaching quietly")
 
         with gr.Row(visible=False) as emo_weight_group:
-            emo_weight = gr.Slider(label=i18n("情感权重"), minimum=0.0, maximum=1.0, value=0.65, step=0.01)
+            emo_weight = gr.Slider(label="Emotion Weight", minimum=0.0, maximum=1.0, value=0.65, step=0.01)
 
-        with gr.Accordion(i18n("高级生成参数设置"), open=False, visible=True) as advanced_settings_group:
+        with gr.Accordion("Advanced Generation Parameter Settings", open=True, visible=True) as advanced_settings_group:
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown(f"**{i18n('GPT2 采样设置')}** _{i18n('参数会影响音频多样性和生成速度详见')} [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
+                    gr.Markdown(f"**GPT2 Sampling Settings** _Parameters affect audio diversity and generation speed. See [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
                     with gr.Row():
-                        do_sample = gr.Checkbox(label="do_sample", value=True, info=i18n("是否进行采样"))
+                        do_sample = gr.Checkbox(label="do_sample", value=True, info="Whether to perform sampling")
                         temperature = gr.Slider(label="temperature", minimum=0.1, maximum=2.0, value=0.8, step=0.1)
                     with gr.Row():
                         top_p = gr.Slider(label="top_p", minimum=0.0, maximum=1.0, value=0.8, step=0.01)
@@ -264,24 +294,28 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     with gr.Row():
                         repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)
                         length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
-                    max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("生成Token最大数量，过小导致音频被截断"), key="max_mel_tokens")
-                    with gr.Row():
-                        low_memory_mode = gr.Checkbox(label=i18n("低内存模式"), value=False,
-                                                     info=i18n("启用低内存模式以支持内存有限的系统（推理速度会变慢）"))
+                        save_as_mp3 = gr.Checkbox(label="Save as MP3 (256kbps)", value=False,
+                                                  visible=MP3_AVAILABLE,
+                                                  info="Save audio as MP3 format instead of WAV" if MP3_AVAILABLE else "Requires pydub: pip install pydub")
+                    max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info="Maximum number of generated tokens. Too small will cause audio truncation", key="max_mel_tokens")
                     # with gr.Row():
                     #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="不建议使用")
                     #     typical_mass = gr.Slider(label="typical_mass", value=0.9, minimum=0.0, maximum=1.0, step=0.1)
                 with gr.Column(scale=2):
-                    gr.Markdown(f'**{i18n("分句设置")}** _{i18n("参数会影响音频质量和生成速度")}_')
+                    gr.Markdown(f'**Sentence Segmentation Settings** _Parameters affect audio quality and generation speed_')
                     with gr.Row():
-                        initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
-                        max_text_tokens_per_segment = gr.Slider(
-                            label=i18n("分句最大Token数"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
-                            info=i18n("建议80~200之间，值越大，分句越长；值越小，分句越碎；过小过大都可能导致音频质量不高"),
-                        )
-                    with gr.Accordion(i18n("预览分句结果"), open=True) as segments_settings:
+                        with gr.Column():
+                            initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
+                            max_text_tokens_per_segment = gr.Slider(
+                                label="Max Tokens per Segment", value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
+                                info="Recommended range: 80-200. Larger values = longer segments; smaller values = more fragmented. Too small or too large may reduce audio quality",
+                            )
+                        with gr.Column():
+                            low_memory_mode = gr.Checkbox(label="Low Memory Mode", value=False,
+                                                         info="Enable low memory mode for systems with limited GPU memory (inference will be slower)")
+                    with gr.Accordion("Preview Sentence Segmentation Results", open=True) as segments_settings:
                         segments_preview = gr.Dataframe(
-                            headers=[i18n("序号"), i18n("分句内容"), i18n("Token数")],
+                            headers=["Index", "Segment Content", "Token Count"],
                             key="segments_preview",
                             wrap=True,
                         )
@@ -292,55 +326,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 # typical_sampling, typical_mass,
             ]
 
-        # we must use `gr.Dataset` to support dynamic UI rewrites, since `gr.Examples`
-        # binds tightly to UI and always restores the initial state of all components,
-        # such as the list of available choices in emo_control_method.
-        example_table = gr.Dataset(label="Examples",
-            samples_per_page=20,
-            samples=get_example_cases(include_experimental=False),
-            type="values",
-            # these components are NOT "connected". it just reads the column labels/available
-            # states from them, so we MUST link to the "all options" versions of all components,
-            # such as `emo_control_method_all` (to be able to see EXPERIMENTAL text labels)!
-            components=[prompt_audio,
-                        emo_control_method_all,  # important: support all mode labels!
-                        input_text_single,
-                        emo_upload,
-                        emo_weight,
-                        emo_text,
-                        vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-        )
 
-    def on_example_click(example):
-        print(f"Example clicked: ({len(example)} values) = {example!r}")
-        return (
-            gr.update(value=example[0]),
-            gr.update(value=example[1]),
-            gr.update(value=example[2]),
-            gr.update(value=example[3]),
-            gr.update(value=example[4]),
-            gr.update(value=example[5]),
-            gr.update(value=example[6]),
-            gr.update(value=example[7]),
-            gr.update(value=example[8]),
-            gr.update(value=example[9]),
-            gr.update(value=example[10]),
-            gr.update(value=example[11]),
-            gr.update(value=example[12]),
-            gr.update(value=example[13]),
-        )
-
-    # click() event works on both desktop and mobile UI
-    example_table.click(on_example_click,
-                        inputs=[example_table],
-                        outputs=[prompt_audio,
-                                 emo_control_method,
-                                 input_text_single,
-                                 emo_upload,
-                                 emo_weight,
-                                 emo_text,
-                                 vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-    )
 
     def on_input_text_change(text, max_text_tokens_per_segment):
         if text and len(text) > 0:
@@ -356,7 +342,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 segments_preview: gr.update(value=data, visible=True, type="array"),
             }
         else:
-            df = pd.DataFrame([], columns=[i18n("序号"), i18n("分句内容"), i18n("Token数")])
+            df = pd.DataFrame([], columns=["Index", "Segment Content", "Token Count"])
             return {
                 segments_preview: gr.update(value=df),
             }
@@ -400,23 +386,6 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                  emo_weight_group]
     )
 
-    def on_experimental_change(is_experimental, current_mode_index):
-        # 切换情感控制选项
-        new_choices = EMO_CHOICES_ALL if is_experimental else EMO_CHOICES_OFFICIAL
-        # if their current mode selection doesn't exist in new choices, reset to 0.
-        # we don't verify that OLD index means the same in NEW list, since we KNOW it does.
-        new_index = current_mode_index if current_mode_index < len(new_choices) else 0
-
-        return (
-            gr.update(choices=new_choices, value=new_choices[new_index]),
-            gr.update(samples=get_example_cases(include_experimental=is_experimental)),
-        )
-
-    experimental_checkbox.change(
-        on_experimental_change,
-        inputs=[experimental_checkbox, emo_control_method],
-        outputs=[emo_control_method, example_table]
-    )
 
     input_text_single.change(
         on_input_text_change,
@@ -439,6 +408,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                             vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                              emo_text,emo_random,
                              max_text_tokens_per_segment,
+                             save_as_mp3,
                              *advanced_params,
                      ],
                      outputs=[output_audio])
