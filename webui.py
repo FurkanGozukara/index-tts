@@ -220,11 +220,9 @@ def update_prompt_audio():
     return update_button
 
 
-with gr.Blocks(title="IndexTTS Demo") as demo:
+with gr.Blocks(title="SECourses IndexTTS2 Premium App") as demo:
     mutex = threading.Lock()
-    gr.HTML('''
-    <h2><center>SECourses Index TTS2 Premium App : <a href="https://www.patreon.com/c/SECourses" target="_blank">https://www.patreon.com/c/SECourses</a></h2>
-    ''')
+    gr.Markdown("## SECourses Index TTS2 Premium App : https://www.patreon.com/c/SECourses")
 
     with gr.Tab("Audio Generation"):
         with gr.Row():
@@ -417,4 +415,4 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
 
 if __name__ == "__main__":
     demo.queue(20)
-    demo.launch(server_name=cmd_args.host, server_port=cmd_args.port)
+    demo.launch(inbrowser=True)
