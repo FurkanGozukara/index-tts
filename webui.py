@@ -220,7 +220,9 @@ def update_prompt_audio():
     return update_button
 
 
-with gr.Blocks(title="SECourses IndexTTS2 Premium App") as demo:
+theme = gr.themes.Soft()
+theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
+with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
     mutex = threading.Lock()
     gr.Markdown("## SECourses Index TTS2 Premium App : https://www.patreon.com/c/SECourses")
 
