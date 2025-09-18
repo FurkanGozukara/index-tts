@@ -38,7 +38,7 @@ import torch.nn.functional as F
 class IndexTTS2:
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
-            use_cuda_kernel=None,use_deepspeed=False
+            use_cuda_kernel=None,use_deepspeed=False, hybrid_model_device=False
     ):
         """
         Args:
@@ -48,141 +48,87 @@ class IndexTTS2:
             device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, it will be set automatically based on the availability of CUDA or MPS.
             use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel, only for CUDA device.
             use_deepspeed (bool): whether to use DeepSpeed or not.
+            hybrid_model_device (bool): whether to use hybrid CPU/GPU mode for low memory systems.
         """
+        self.hybrid_model_device = hybrid_model_device
         if device is not None:
-            self.device = device
-            self.use_fp16 = False if device == "cpu" else use_fp16
-            self.use_cuda_kernel = use_cuda_kernel is not None and use_cuda_kernel and device.startswith("cuda")
+            self.device = torch.device(device) if isinstance(device, str) else device
+            self.use_fp16 = False if str(self.device) == "cpu" else use_fp16
+            self.use_cuda_kernel = use_cuda_kernel is not None and use_cuda_kernel and str(self.device).startswith("cuda")
         elif torch.cuda.is_available():
-            self.device = "cuda:0"
+            self.device = torch.device("cuda:0")
             self.use_fp16 = use_fp16
             self.use_cuda_kernel = use_cuda_kernel is None or use_cuda_kernel
         elif hasattr(torch, "xpu") and torch.xpu.is_available():
-            self.device = "xpu"
+            self.device = torch.device("xpu")
             self.use_fp16 = use_fp16
             self.use_cuda_kernel = False
         elif hasattr(torch, "mps") and torch.backends.mps.is_available():
-            self.device = "mps"
+            self.device = torch.device("mps")
             self.use_fp16 = False  # Use float16 on MPS is overhead than float32
             self.use_cuda_kernel = False
         else:
-            self.device = "cpu"
+            self.device = torch.device("cpu")
             self.use_fp16 = False
             self.use_cuda_kernel = False
             print(">> Be patient, it may take a while to run in CPU mode.")
 
         self.cfg = OmegaConf.load(cfg_path)
         self.model_dir = model_dir
+        self.cfg_path = cfg_path
         self.dtype = torch.float16 if self.use_fp16 else None
         self.stop_mel_token = self.cfg.gpt.stop_mel_token
+        self.use_deepspeed = use_deepspeed
 
-        self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
+        # For lazy loading
+        self.models_loaded = False
 
-        self.gpt = UnifiedVoice(**self.cfg.gpt)
-        self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
-        load_checkpoint(self.gpt, self.gpt_path)
-        self.gpt = self.gpt.to(self.device)
-        if self.use_fp16:
-            self.gpt.eval().half()
-        else:
-            self.gpt.eval()
-        print(">> GPT weights restored from:", self.gpt_path)
+        # Initialize placeholders for models
+        self.qwen_emo = None
+        self.gpt = None
+        self.semantic_model = None
+        self.semantic_codec = None
+        self.s2mel = None
+        self.campplus_model = None
+        self.bigvgan = None
+        # tokenizer and normalizer are initialized below for UI preview
+        self.emo_matrix = None
+        self.spk_matrix = None
+        self.mel_fn = None
+        self.extract_features = None
+        self.semantic_mean = None
+        self.semantic_std = None
 
-        if use_deepspeed:
-            try:
-                import deepspeed
-            except (ImportError, OSError, CalledProcessError) as e:
-                use_deepspeed = False
-                print(f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}")
+        # For hybrid mode: track original device for model movement
+        self.original_device = self.device
+        self.cpu_device = torch.device('cpu')
 
-        self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16)
+        # GPT model initialization moved to load_models()
 
-        if self.use_cuda_kernel:
-            # preload the CUDA kernel for BigVGAN
-            try:
-                from indextts.s2mel.modules.bigvgan.alias_free_activation.cuda import activation1d
+        # DeepSpeed initialization moved to load_models()
 
-                print(">> Preload custom CUDA kernel for BigVGAN", activation1d.anti_alias_activation_cuda)
-            except Exception as e:
-                print(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
-                print(f"{e!r}")
-                self.use_cuda_kernel = False
+        # CUDA kernel check moved to load_models()
 
-        self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
-        self.semantic_model, self.semantic_mean, self.semantic_std = build_semantic_model(
-            os.path.join(self.model_dir, self.cfg.w2v_stat))
-        self.semantic_model = self.semantic_model.to(self.device)
-        self.semantic_model.eval()
-        self.semantic_mean = self.semantic_mean.to(self.device)
-        self.semantic_std = self.semantic_std.to(self.device)
+        # Semantic model initialization moved to load_models()
 
-        semantic_codec = build_semantic_codec(self.cfg.semantic_codec)
-        semantic_code_ckpt = hf_hub_download("amphion/MaskGCT", filename="semantic_codec/model.safetensors")
-        safetensors.torch.load_model(semantic_codec, semantic_code_ckpt)
-        self.semantic_codec = semantic_codec.to(self.device)
-        self.semantic_codec.eval()
-        print('>> semantic_codec weights restored from: {}'.format(semantic_code_ckpt))
+        # Semantic codec initialization moved to load_models()
 
-        s2mel_path = os.path.join(self.model_dir, self.cfg.s2mel_checkpoint)
-        s2mel = MyModel(self.cfg.s2mel, use_gpt_latent=True)
-        s2mel, _, _, _ = load_checkpoint2(
-            s2mel,
-            None,
-            s2mel_path,
-            load_only_params=True,
-            ignore_modules=[],
-            is_distributed=False,
-        )
-        self.s2mel = s2mel.to(self.device)
-        self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
-        self.s2mel.eval()
-        print(">> s2mel weights restored from:", s2mel_path)
+        # S2Mel model initialization moved to load_models()
 
-        # load campplus_model
-        campplus_ckpt_path = hf_hub_download(
-            "funasr/campplus", filename="campplus_cn_common.bin"
-        )
-        campplus_model = CAMPPlus(feat_dim=80, embedding_size=192)
-        campplus_model.load_state_dict(torch.load(campplus_ckpt_path, map_location="cpu"))
-        self.campplus_model = campplus_model.to(self.device)
-        self.campplus_model.eval()
-        print(">> campplus_model weights restored from:", campplus_ckpt_path)
+        # CAMPPlus model initialization moved to load_models()
 
-        bigvgan_name = self.cfg.vocoder.name
-        self.bigvgan = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=self.use_cuda_kernel)
-        self.bigvgan = self.bigvgan.to(self.device)
-        self.bigvgan.remove_weight_norm()
-        self.bigvgan.eval()
-        print(">> bigvgan weights restored from:", bigvgan_name)
+        # BigVGAN model initialization moved to load_models()
 
+        # Text processing and matrix initialization moved to load_models()
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
-        self.normalizer = TextNormalizer()
-        self.normalizer.load()
-        print(">> TextNormalizer loaded")
-        self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
-        print(">> bpe model loaded from:", self.bpe_path)
-
-        emo_matrix = torch.load(os.path.join(self.model_dir, self.cfg.emo_matrix))
-        self.emo_matrix = emo_matrix.to(self.device)
         self.emo_num = list(self.cfg.emo_num)
 
-        spk_matrix = torch.load(os.path.join(self.model_dir, self.cfg.spk_matrix))
-        self.spk_matrix = spk_matrix.to(self.device)
-
-        self.emo_matrix = torch.split(self.emo_matrix, self.emo_num)
-        self.spk_matrix = torch.split(self.spk_matrix, self.emo_num)
-
-        mel_fn_args = {
-            "n_fft": self.cfg.s2mel['preprocess_params']['spect_params']['n_fft'],
-            "win_size": self.cfg.s2mel['preprocess_params']['spect_params']['win_length'],
-            "hop_size": self.cfg.s2mel['preprocess_params']['spect_params']['hop_length'],
-            "num_mels": self.cfg.s2mel['preprocess_params']['spect_params']['n_mels'],
-            "sampling_rate": self.cfg.s2mel["preprocess_params"]["sr"],
-            "fmin": self.cfg.s2mel['preprocess_params']['spect_params'].get('fmin', 0),
-            "fmax": None if self.cfg.s2mel['preprocess_params']['spect_params'].get('fmax', "None") == "None" else 8000,
-            "center": False
-        }
-        self.mel_fn = lambda x: mel_spectrogram(x, **mel_fn_args)
+        # Initialize tokenizer early for UI preview functionality
+        # These are lightweight and needed for text preview
+        self.normalizer = TextNormalizer()
+        self.normalizer.load()
+        self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
+        print(">> Text tokenizer loaded for preview functionality")
 
         # 缓存参考音频：
         self.cache_spk_cond = None
@@ -197,8 +143,166 @@ class IndexTTS2:
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
 
+    def load_models(self):
+        """Load all models - called only when first synthesis is requested"""
+        if self.models_loaded:
+            return
+
+        print(">> Loading models for first synthesis...")
+
+        # Initialize QwenEmotion
+        self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
+
+        # Initialize GPT model
+        self.gpt = UnifiedVoice(**self.cfg.gpt)
+        self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
+        load_checkpoint(self.gpt, self.gpt_path)
+        # In hybrid mode, keep model on CPU initially
+        if self.hybrid_model_device:
+            self.gpt = self.gpt.to(self.cpu_device)
+            print(">> GPT loaded to CPU (hybrid mode)")
+        else:
+            self.gpt = self.gpt.to(self.device)
+        if self.use_fp16:
+            self.gpt.eval().half()
+        else:
+            self.gpt.eval()
+        print(">> GPT weights restored from:", self.gpt_path)
+
+        # DeepSpeed configuration
+        if self.use_deepspeed:
+            try:
+                import deepspeed
+            except (ImportError, OSError, CalledProcessError) as e:
+                self.use_deepspeed = False
+                print(f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}")
+
+        self.gpt.post_init_gpt2_config(use_deepspeed=self.use_deepspeed, kv_cache=True, half=self.use_fp16)
+
+        # CUDA kernel check for BigVGAN
+        if self.use_cuda_kernel:
+            try:
+                from indextts.s2mel.modules.bigvgan.alias_free_activation.cuda import activation1d
+                print(">> Preload custom CUDA kernel for BigVGAN", activation1d.anti_alias_activation_cuda)
+            except Exception as e:
+                print(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
+                print(f"{e!r}")
+                self.use_cuda_kernel = False
+
+        # Initialize semantic models
+        self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
+        self.semantic_model, self.semantic_mean, self.semantic_std = build_semantic_model(
+            os.path.join(self.model_dir, self.cfg.w2v_stat))
+        # In hybrid mode, keep models on CPU initially
+        if self.hybrid_model_device:
+            self.semantic_model = self.semantic_model.to(self.cpu_device)
+            self.semantic_mean = self.semantic_mean.to(self.cpu_device)
+            self.semantic_std = self.semantic_std.to(self.cpu_device)
+            print(">> Semantic model loaded to CPU (hybrid mode)")
+        else:
+            self.semantic_model = self.semantic_model.to(self.device)
+            self.semantic_mean = self.semantic_mean.to(self.device)
+            self.semantic_std = self.semantic_std.to(self.device)
+        self.semantic_model.eval()
+
+        # Initialize semantic codec
+        semantic_codec = build_semantic_codec(self.cfg.semantic_codec)
+        semantic_code_ckpt = hf_hub_download("amphion/MaskGCT", filename="semantic_codec/model.safetensors")
+        safetensors.torch.load_model(semantic_codec, semantic_code_ckpt)
+        # In hybrid mode, keep model on CPU initially
+        if self.hybrid_model_device:
+            self.semantic_codec = semantic_codec.to(self.cpu_device)
+            print(">> Semantic codec loaded to CPU (hybrid mode)")
+        else:
+            self.semantic_codec = semantic_codec.to(self.device)
+        self.semantic_codec.eval()
+        print('>> semantic_codec weights restored from: {}'.format(semantic_code_ckpt))
+
+        # Initialize S2Mel model
+        s2mel_path = os.path.join(self.model_dir, self.cfg.s2mel_checkpoint)
+        s2mel = MyModel(self.cfg.s2mel, use_gpt_latent=True)
+        s2mel, _, _, _ = load_checkpoint2(
+            s2mel,
+            None,
+            s2mel_path,
+            load_only_params=True,
+            ignore_modules=[],
+            is_distributed=False,
+        )
+        # In hybrid mode, keep model on CPU initially
+        if self.hybrid_model_device:
+            self.s2mel = s2mel.to(self.cpu_device)
+            print(">> S2Mel loaded to CPU (hybrid mode)")
+        else:
+            self.s2mel = s2mel.to(self.device)
+        self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
+        self.s2mel.eval()
+        print(">> s2mel weights restored from:", s2mel_path)
+
+        # Load CAMPPlus model
+        campplus_ckpt_path = hf_hub_download(
+            "funasr/campplus", filename="campplus_cn_common.bin"
+        )
+        campplus_model = CAMPPlus(feat_dim=80, embedding_size=192)
+        campplus_model.load_state_dict(torch.load(campplus_ckpt_path, map_location="cpu"))
+        # In hybrid mode, keep model on CPU initially
+        if self.hybrid_model_device:
+            self.campplus_model = campplus_model.to(self.cpu_device)
+            print(">> CAMPPlus loaded to CPU (hybrid mode)")
+        else:
+            self.campplus_model = campplus_model.to(self.device)
+        self.campplus_model.eval()
+        print(">> campplus_model weights restored from:", campplus_ckpt_path)
+
+        # Initialize BigVGAN
+        bigvgan_name = self.cfg.vocoder.name
+        self.bigvgan = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=self.use_cuda_kernel)
+        # In hybrid mode, keep model on CPU initially
+        if self.hybrid_model_device:
+            self.bigvgan = self.bigvgan.to(self.cpu_device)
+            print(">> BigVGAN loaded to CPU (hybrid mode)")
+        else:
+            self.bigvgan = self.bigvgan.to(self.device)
+        self.bigvgan.remove_weight_norm()
+        self.bigvgan.eval()
+        print(">> bigvgan weights restored from:", bigvgan_name)
+
+        # Text processing already initialized in __init__ for UI preview
+
+        # Load emotion and speaker matrices
+        emo_matrix = torch.load(os.path.join(self.model_dir, self.cfg.emo_matrix))
+        self.emo_matrix = emo_matrix.to(self.device)
+
+        spk_matrix = torch.load(os.path.join(self.model_dir, self.cfg.spk_matrix))
+        self.spk_matrix = spk_matrix.to(self.device)
+
+        self.emo_matrix = torch.split(self.emo_matrix, self.emo_num)
+        self.spk_matrix = torch.split(self.spk_matrix, self.emo_num)
+
+        # Initialize mel function
+        mel_fn_args = {
+            "n_fft": self.cfg.s2mel['preprocess_params']['spect_params']['n_fft'],
+            "win_size": self.cfg.s2mel['preprocess_params']['spect_params']['win_length'],
+            "hop_size": self.cfg.s2mel['preprocess_params']['spect_params']['hop_length'],
+            "num_mels": self.cfg.s2mel['preprocess_params']['spect_params']['n_mels'],
+            "sampling_rate": self.cfg.s2mel["preprocess_params"]["sr"],
+            "fmin": self.cfg.s2mel['preprocess_params']['spect_params'].get('fmin', 0),
+            "fmax": None if self.cfg.s2mel['preprocess_params']['spect_params'].get('fmax', "None") == "None" else 8000,
+            "center": False
+        }
+        self.mel_fn = lambda x: mel_spectrogram(x, **mel_fn_args)
+
+        self.models_loaded = True
+        print(">> All models loaded successfully!")
+
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
+        # Move semantic model to device if in hybrid mode
+        if self.hybrid_model_device:
+            self.semantic_model = self.semantic_model.to(self.device)
+            self.semantic_mean = self.semantic_mean.to(self.device)
+            self.semantic_std = self.semantic_std.to(self.device)
+
         vq_emb = self.semantic_model(
             input_features=input_features,
             attention_mask=attention_mask,
@@ -206,6 +310,14 @@ class IndexTTS2:
         )
         feat = vq_emb.hidden_states[17]  # (B, T, C)
         feat = (feat - self.semantic_mean) / self.semantic_std
+
+        # Move back to CPU if in hybrid mode
+        if self.hybrid_model_device:
+            self.semantic_model = self.semantic_model.to(self.cpu_device)
+            self.semantic_mean = self.semantic_mean.to(self.cpu_device)
+            self.semantic_std = self.semantic_std.to(self.cpu_device)
+            self._clear_memory_cache()
+
         return feat
 
     def remove_long_silence(self, codes: torch.Tensor, silent_token=52, max_consecutive=30):
@@ -322,12 +434,48 @@ class IndexTTS2:
 
         return emo_vector
 
+    def _get_model_device(self, model):
+        """Helper to get the device of a model"""
+        if model is None:
+            return None
+        try:
+            return next(model.parameters()).device
+        except StopIteration:
+            # Model has no parameters, return default device
+            return self.device
+
+    def _move_model_to_device(self, model, device):
+        """Helper to move model to device and clear cache"""
+        if self.hybrid_model_device and model is not None:
+            # Ensure device is a torch.device object
+            if isinstance(device, str):
+                device = torch.device(device)
+
+            model = model.to(device)
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+            elif hasattr(torch, 'mps') and device.type == 'mps':
+                torch.mps.empty_cache()
+        return model
+
+    def _clear_memory_cache(self):
+        """Clear GPU/MPS memory cache"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
     # 原始推理模式
     def infer(self, spk_audio_prompt, text, output_path,
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
               verbose=False, max_text_tokens_per_segment=120, **generation_kwargs):
+        # Load models on first use
+        if not self.models_loaded:
+            self._set_gr_progress(0, "Loading models for first synthesis...")
+            self.load_models()
+
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
@@ -346,10 +494,28 @@ class IndexTTS2:
             # automatically generate emotion vectors from text prompt
             if emo_text is None:
                 emo_text = text  # use main text prompt
+
+            # In hybrid mode, ensure QwenEmotion model is loaded when needed
+            if self.hybrid_model_device:
+                # Move other models to CPU to free up memory if needed
+                if self.gpt is not None:
+                    current_device = self._get_model_device(self.gpt)
+                    if current_device and current_device.type != 'cpu':
+                        self.gpt = self._move_model_to_device(self.gpt, self.cpu_device)
+                        self._clear_memory_cache()
+
             emo_dict = self.qwen_emo.inference(emo_text)
             print(f"detected emotion vectors from text: {emo_dict}")
             # convert ordered dict to list of vectors; the order is VERY important!
             emo_vector = list(emo_dict.values())
+
+            # In hybrid mode, unload QwenEmotion model after use
+            if self.hybrid_model_device and self.qwen_emo.model_loaded:
+                if self.qwen_emo.model is not None:
+                    del self.qwen_emo.model
+                    self.qwen_emo.model = None
+                    self.qwen_emo.model_loaded = False
+                    self._clear_memory_cache()
 
         if emo_vector is not None:
             # we have emotion vectors; they can't be blended via alpha mixing
@@ -387,7 +553,17 @@ class IndexTTS2:
             attention_mask = attention_mask.to(self.device)
             spk_cond_emb = self.get_emb(input_features, attention_mask)
 
+            # Move semantic_codec to device if in hybrid mode
+            if self.hybrid_model_device:
+                self.semantic_codec = self.semantic_codec.to(self.device)
+
             _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
+
+            # Move semantic_codec back to CPU if in hybrid mode
+            if self.hybrid_model_device:
+                self.semantic_codec = self.semantic_codec.to(self.cpu_device)
+                self._clear_memory_cache()
+
             ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
             ref_target_lengths = torch.LongTensor([ref_mel.size(2)]).to(ref_mel.device)
             feat = torchaudio.compliance.kaldi.fbank(audio_16k.to(ref_mel.device),
@@ -395,12 +571,31 @@ class IndexTTS2:
                                                      dither=0,
                                                      sample_frequency=16000)
             feat = feat - feat.mean(dim=0, keepdim=True)  # feat2另外一个滤波器能量组特征[922, 80]
+
+            # Move campplus_model to device if in hybrid mode
+            if self.hybrid_model_device:
+                self.campplus_model = self.campplus_model.to(self.device)
+
             style = self.campplus_model(feat.unsqueeze(0))  # 参考音频的全局style2[1,192]
+
+            # Move campplus_model back to CPU if in hybrid mode
+            if self.hybrid_model_device:
+                self.campplus_model = self.campplus_model.to(self.cpu_device)
+                self._clear_memory_cache()
+
+            # Move s2mel to device if in hybrid mode
+            if self.hybrid_model_device:
+                self.s2mel = self.s2mel.to(self.device)
 
             prompt_condition = self.s2mel.models['length_regulator'](S_ref,
                                                                      ylens=ref_target_lengths,
                                                                      n_quantizers=3,
                                                                      f0=None)[0]
+
+            # Move s2mel back to CPU if in hybrid mode (keep it for later use in generation)
+            if self.hybrid_model_device:
+                self.s2mel = self.s2mel.to(self.cpu_device)
+                self._clear_memory_cache()
 
             self.cache_spk_cond = spk_cond_emb
             self.cache_s2mel_style = style
@@ -497,6 +692,11 @@ class IndexTTS2:
                         emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
                         # emovec = emovec_mat
 
+                    # In hybrid mode, move GPT to device for inference
+                    if self.hybrid_model_device:
+                        self.gpt = self.gpt.to(self.device)
+                        print(">> [Hybrid] GPT moved to device for inference")
+
                     codes, speech_conditioning_latent = self.gpt.inference_speech(
                         spk_cond_emb,
                         text_tokens,
@@ -566,11 +766,24 @@ class IndexTTS2:
                     )
                     gpt_forward_time += time.perf_counter() - m_start_time
 
+                    # Move GPT back to CPU after use in hybrid mode
+                    if self.hybrid_model_device:
+                        self.gpt = self.gpt.to(self.cpu_device)
+                        self._clear_memory_cache()
+                        print(">> [Hybrid] GPT moved back to CPU")
+
                 dtype = None
                 with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
                     m_start_time = time.perf_counter()
                     diffusion_steps = 25
                     inference_cfg_rate = 0.7
+
+                    # Move s2mel and semantic_codec to device in hybrid mode
+                    if self.hybrid_model_device:
+                        self.s2mel = self.s2mel.to(self.device)
+                        self.semantic_codec = self.semantic_codec.to(self.device)
+                        print(">> [Hybrid] S2Mel and semantic_codec moved to device")
+
                     latent = self.s2mel.models['gpt_layer'](latent)
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
                     S_infer = S_infer.transpose(1, 2)
@@ -590,10 +803,24 @@ class IndexTTS2:
                     vc_target = vc_target[:, :, ref_mel.size(-1):]
                     s2mel_time += time.perf_counter() - m_start_time
 
+                    # Move s2mel and semantic_codec back to CPU, move BigVGAN to device in hybrid mode
+                    if self.hybrid_model_device:
+                        self.s2mel = self.s2mel.to(self.cpu_device)
+                        self.semantic_codec = self.semantic_codec.to(self.cpu_device)
+                        self._clear_memory_cache()
+                        self.bigvgan = self.bigvgan.to(self.device)
+                        print(">> [Hybrid] S2Mel/semantic_codec moved to CPU, BigVGAN moved to device")
+
                     m_start_time = time.perf_counter()
                     wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
                     print(wav.shape)
                     bigvgan_time += time.perf_counter() - m_start_time
+
+                    # Move BigVGAN back to CPU in hybrid mode
+                    if self.hybrid_model_device:
+                        self.bigvgan = self.bigvgan.to(self.cpu_device)
+                        self._clear_memory_cache()
+                        print(">> [Hybrid] BigVGAN moved back to CPU")
                     wav = wav.squeeze(1)
 
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
@@ -645,13 +872,21 @@ def find_most_similar_cosine(query_vector, matrix):
 class QwenEmotion:
     def __init__(self, model_dir):
         self.model_dir = model_dir
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_dir,
-            torch_dtype="float16",  # "auto"
-            device_map="auto"
-        )
+        self.model = None
+        self.tokenizer = None
+        self.model_loaded = False
         self.prompt = "文本情感分类"
+
+    def load_model(self):
+        """Lazy load the model when first needed"""
+        if not self.model_loaded:
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_dir,
+                torch_dtype="float16",  # "auto"
+                device_map="auto"
+            )
+            self.model_loaded = True
         self.cn_key_to_en = {
             "高兴": "happy",
             "愤怒": "angry",
@@ -702,6 +937,10 @@ class QwenEmotion:
         return emotion_dict
 
     def inference(self, text_input):
+        # Load model on first use
+        if not self.model_loaded:
+            self.load_model()
+
         start = time.time()
         messages = [
             {"role": "system", "content": f"{self.prompt}"},

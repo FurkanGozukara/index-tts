@@ -121,7 +121,11 @@ def gen_single(emo_control_method,prompt, text,
     # set gradio progress
     tts.gr_progress = progress
     do_sample, top_p, top_k, temperature, \
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens = args
+        length_penalty, num_beams, repetition_penalty, max_mel_tokens, low_memory_mode = args
+
+    # Update the low memory mode setting
+    tts.hybrid_model_device = bool(low_memory_mode)
+
     kwargs = {
         "do_sample": bool(do_sample),
         "top_p": float(top_p),
@@ -261,6 +265,9 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                         repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)
                         length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
                     max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("生成Token最大数量，过小导致音频被截断"), key="max_mel_tokens")
+                    with gr.Row():
+                        low_memory_mode = gr.Checkbox(label=i18n("低内存模式"), value=False,
+                                                     info=i18n("启用低内存模式以支持内存有限的系统（推理速度会变慢）"))
                     # with gr.Row():
                     #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="不建议使用")
                     #     typical_mass = gr.Slider(label="typical_mass", value=0.9, minimum=0.0, maximum=1.0, step=0.1)
@@ -281,6 +288,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             advanced_params = [
                 do_sample, top_p, top_k, temperature,
                 length_penalty, num_beams, repetition_penalty, max_mel_tokens,
+                low_memory_mode,
                 # typical_sampling, typical_mass,
             ]
 
