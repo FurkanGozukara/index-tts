@@ -5,6 +5,8 @@ import sys
 import threading
 import time
 import glob
+import platform
+import subprocess
 
 import warnings
 
@@ -116,6 +118,23 @@ def get_next_file_number(output_dir="outputs", target_folder=None, prefix=""):
         return max(numbers) + 1
     else:
         return 1
+
+def open_outputs_folder():
+    """Open the outputs folder in the system's file manager (cross-platform)."""
+    output_dir = os.path.abspath("outputs")
+    os.makedirs(output_dir, exist_ok=True)
+
+    system = platform.system()
+    try:
+        if system == "Windows":
+            os.startfile(output_dir)
+        elif system == "Darwin":  # macOS
+            subprocess.run(["open", output_dir])
+        else:  # Linux and other Unix-like systems
+            subprocess.run(["xdg-open", output_dir])
+        print(f"Opened outputs folder: {output_dir}")
+    except Exception as e:
+        print(f"Failed to open outputs folder: {str(e)}")
 
 def generate_output_path(target_folder=None, filename=None, save_as_mp3=False, prefix=""):
     """Generate output file path with sequential numbering."""
@@ -235,6 +254,15 @@ def gen_single(emo_control_method,prompt, text,
 
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
 
+    # Ensure max_text_tokens_per_segment is within valid range
+    try:
+        max_tokens = int(max_text_tokens_per_segment) if max_text_tokens_per_segment else 120
+        # Clamp to valid range
+        max_tokens = max(20, min(max_tokens, tts.cfg.gpt.max_text_tokens))
+    except (ValueError, TypeError):
+        # Use default if conversion fails
+        max_tokens = 120
+
     # Pass new parameters to infer
     output = tts.infer(spk_audio_prompt=prompt, text=text,
                        output_path=output_path,
@@ -242,7 +270,7 @@ def gen_single(emo_control_method,prompt, text,
                        emo_vector=vec,
                        use_emo_text=(emo_control_method==3), emo_text=emo_text,use_random=emo_random,
                        verbose=cmd_args.verbose,
-                       max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+                       max_text_tokens_per_segment=max_tokens,
                        interval_silence=int(interval_silence),
                        diffusion_steps=int(diffusion_steps),
                        inference_cfg_rate=float(inference_cfg_rate),
@@ -272,7 +300,7 @@ theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
     mutex = threading.Lock()
-    gr.Markdown("## SECourses Index TTS2 Premium App : https://www.patreon.com/c/SECourses")
+    gr.Markdown("## SECourses Index TTS2 Premium App V1 : https://www.patreon.com/c/SECourses")
 
     with gr.Tab("Audio Generation"):
         with gr.Row():
@@ -294,7 +322,9 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                     placeholder="Enter the text you want to convert to speech",
                     info=f"Model v{tts.model_version or '1.0'} | Supports multiple languages. Long texts will be automatically segmented."
                 )
-                gen_button = gr.Button("Generate Speech", key="gen_button", interactive=True, variant="primary")
+                with gr.Row():
+                    gen_button = gr.Button("Generate Speech", key="gen_button", interactive=True, variant="primary")
+                    open_outputs_button = gr.Button("📁 Open Outputs Folder", key="open_outputs_button")
             output_audio = gr.Audio(
                 label="Generated Result (click to play/download)",
                 visible=True,
@@ -378,7 +408,28 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                     info="Controls how strongly the model follows the voice, emotion, and style characteristics from reference audio. Higher values = stricter adherence to reference, lower = more variation. 0.0 = no guidance (random), 0.7 = balanced (default), >1.0 = very strong adherence to reference characteristics."
                 )
 
-            # Row 2: Enable Sampling and Temperature
+            # Row 2: Reference Audio Processing Limits
+            with gr.Row():
+                with gr.Column():
+                    max_speaker_audio_length = gr.Slider(
+                        label="Max Speaker Reference Length (seconds)",
+                        value=30,
+                        minimum=3,
+                        maximum=90,
+                        step=1,
+                        info="How much of the speaker reference audio to use. Model works best with 5-15 seconds. Maximum set to 90 seconds for safety. Default: 30s"
+                    )
+                with gr.Column():
+                    max_emotion_audio_length = gr.Slider(
+                        label="Max Emotion Reference Length (seconds)",
+                        value=30,
+                        minimum=3,
+                        maximum=90,
+                        step=1,
+                        info="How much of the emotion reference audio to use. Model works best with 5-15 seconds. Maximum set to 90 seconds for safety. Default: 30s"
+                    )
+
+            # Row 3: Enable Sampling and Temperature
             with gr.Row():
                 do_sample = gr.Checkbox(
                     label="Enable Sampling",
@@ -394,7 +445,7 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                     info="Controls speech expressiveness. Higher (0.9-1.2) = more varied intonation and expression. Lower (0.3-0.7) = flatter but more stable speech. Default 0.8 is balanced."
                 )
 
-            # Row 3: Beam Search Beams and Max Tokens per Segment
+            # Row 4: Beam Search Beams and Max Tokens per Segment
             with gr.Row():
                 num_beams = gr.Slider(
                     label="Beam Search Beams",
@@ -405,17 +456,17 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                     info="Explores multiple generation paths simultaneously. Higher (5-10) = better quality but slower. Lower (1-3) = faster but potentially worse quality. Default 3 balances speed and quality."
                 )
                 initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
-                max_text_tokens_per_segment = gr.Slider(
+                max_text_tokens_per_segment = gr.Number(
                     label="Max Tokens per Segment",
                     value=initial_value,
                     minimum=20,
                     maximum=tts.cfg.gpt.max_text_tokens,
-                    step=2,
+                    precision=0,
                     key="max_text_tokens_per_segment",
                     info=f"Splits long text into chunks for processing. Smaller (80-120) = more natural pauses and consistent quality but slower. Larger (150-200) = faster but may have quality variations. Model limit: {tts.cfg.gpt.max_text_tokens}. Default: {initial_value}"
                 )
 
-            # Row 4: Save as MP3 and Low Memory Mode
+            # Row 5: Save as MP3 and Low Memory Mode
             with gr.Row():
                 save_as_mp3 = gr.Checkbox(
                     label="Save as MP3",
@@ -518,27 +569,6 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                     maximum=1000,
                     step=50,
                     info="Pause length between text segments. Higher (500-1000ms) = formal presentation style with clear breaks. Lower (50-200ms) = conversational flow. Default 200ms is natural for most content."
-                )
-
-        gr.Markdown("### 📊 Reference Audio Processing Limits")
-        with gr.Row():
-            with gr.Column():
-                max_speaker_audio_length = gr.Slider(
-                    label="Max Speaker Reference Length (seconds)",
-                    value=15,
-                    minimum=3,
-                    maximum=30,
-                    step=1,
-                    info="How much of the speaker reference audio to use. Model works best with 5-15 seconds. Longer clips may not improve quality. Default: 15s"
-                )
-            with gr.Column():
-                max_emotion_audio_length = gr.Slider(
-                    label="Max Emotion Reference Length (seconds)",
-                    value=15,
-                    minimum=3,
-                    maximum=30,
-                    step=1,
-                    info="How much of the emotion reference audio to use. Model works best with 5-15 seconds. Longer clips may not improve emotion capture. Default: 15s"
                 )
 
         gr.Markdown("### 🎯 Emotion Control Parameters")
@@ -644,9 +674,19 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
 
     def on_input_text_change(text, max_text_tokens_per_segment):
         if text and len(text) > 0:
+            # Ensure max_text_tokens_per_segment is within valid range
+            # This prevents errors when users are typing values
+            try:
+                max_tokens = int(max_text_tokens_per_segment) if max_text_tokens_per_segment else 120
+                # Clamp to valid range
+                max_tokens = max(20, min(max_tokens, tts.cfg.gpt.max_text_tokens))
+            except (ValueError, TypeError):
+                # Use default if conversion fails
+                max_tokens = 120
+
             text_tokens_list = tts.tokenizer.tokenize(text)
 
-            segments = tts.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=int(max_text_tokens_per_segment))
+            segments = tts.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=max_tokens)
             data = []
             for i, s in enumerate(segments):
                 segment_str = ''.join(s)
@@ -728,6 +768,8 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                              *model_params,
                      ],
                      outputs=[output_audio])
+
+    open_outputs_button.click(open_outputs_folder)
 
 
 
