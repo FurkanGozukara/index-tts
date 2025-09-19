@@ -311,7 +311,7 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
         with gr.Row():
             os.makedirs("prompts",exist_ok=True)
             prompt_audio = gr.Audio(
-                label="Speaker Reference Audio (3-15 seconds)",
+                label="Speaker Reference Audio (3-90 seconds)",
                 key="prompt_audio",
                 sources=["upload","microphone"],
                 type="filepath"
@@ -458,14 +458,14 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                     minimum=1,
                     maximum=10,
                     step=1,
-                    info="Explores multiple generation paths simultaneously. Higher (5-10) = better quality but slower. Lower (1-3) = faster but potentially worse quality. Default 3 balances speed and quality."
+                    info="Explores multiple generation paths simultaneously. Higher (5-10) = better quality but slower. Lower (1-3) = faster but potentially worse quality. Default 3 balances speed and quality. Bigger also uses more VRAM."
                 )
                 initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
                 max_text_tokens_per_segment = gr.Textbox(
                     label="Max Tokens per Segment",
                     value=str(initial_value),
                     key="max_text_tokens_per_segment",
-                    info=f"Splits long text into chunks for processing. Valid range: 20-{tts.cfg.gpt.max_text_tokens}. Smaller (80-120) = more natural pauses and consistent quality but slower. Larger (150-200) = faster but may have quality variations. Default: {initial_value}"
+                    info=f"Splits long text into chunks for processing. Valid range: 20-{tts.cfg.gpt.max_text_tokens}. Smaller (80-120) = more natural pauses and consistent quality but slower. Larger (150-200) = faster but may have quality variations. Default: {initial_value}. Bigger value uses more VRAM."
                 )
 
             # Row 5: Save as MP3 and Low Memory Mode
