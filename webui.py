@@ -358,258 +358,289 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                 info="Controls the strength of emotion blending. 0 = no emotion, 1 = full emotion from reference. Default: 0.65"
             )
 
-        with gr.Accordion("Advanced Generation Parameter Settings", open=False, visible=True) as advanced_settings_group:
+        with gr.Accordion("Advanced Generation Parameter Settings", open=True, visible=True) as advanced_settings_group:
+            # Row 1: Diffusion Steps and CFG Rate
             with gr.Row():
-                with gr.Column(scale=1):
-                    gr.Markdown(f"**GPT2 Sampling Settings** _Parameters affect audio diversity and generation speed. See [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
-                    with gr.Row():
-                        do_sample = gr.Checkbox(
-                            label="Enable Sampling",
-                            value=True,
-                            info="Use probabilistic sampling for more natural variation. Turn OFF for deterministic output."
-                        )
-                        temperature = gr.Slider(
-                            label="Temperature",
-                            minimum=0.1,
-                            maximum=2.0,
-                            value=0.8,
-                            step=0.1,
-                            info="Controls randomness. Lower = more focused/predictable, Higher = more creative/diverse. Default: 0.8"
-                        )
-                    with gr.Row():
-                        top_p = gr.Slider(
-                            label="Top-p (Nucleus Sampling)",
-                            minimum=0.0,
-                            maximum=1.0,
-                            value=0.8,
-                            step=0.01,
-                            info="Cumulative probability for token selection. Lower = safer choices, Higher = more variation. Default: 0.8"
-                        )
-                        top_k = gr.Slider(
-                            label="Top-k",
-                            minimum=0,
-                            maximum=100,
-                            value=30,
-                            step=1,
-                            info="Number of highest probability tokens to consider. 0 = disabled. Default: 30"
-                        )
-                        num_beams = gr.Slider(
-                            label="Beam Search Beams",
-                            value=3,
-                            minimum=1,
-                            maximum=10,
-                            step=1,
-                            info="Number of beams for beam search. Higher = better quality but slower. Default: 3"
-                        )
-                    with gr.Row():
-                        repetition_penalty = gr.Number(
-                            label="Repetition Penalty",
-                            precision=None,
-                            value=10.0,
-                            minimum=0.1,
-                            maximum=20.0,
-                            step=0.1,
-                            info="Penalizes repeated tokens. Higher = less repetition. Default: 10.0"
-                        )
-                        length_penalty = gr.Number(
-                            label="Length Penalty",
-                            precision=None,
-                            value=0.0,
-                            minimum=-2.0,
-                            maximum=2.0,
-                            step=0.1,
-                            info="Controls output length. Positive = longer, Negative = shorter. Default: 0.0"
-                        )
-                        save_as_mp3 = gr.Checkbox(label="Save as MP3", value=False,
-                                                  visible=MP3_AVAILABLE,
-                                                  info="Save audio as MP3 format instead of WAV" if MP3_AVAILABLE else "Requires pydub: pip install pydub")
-                    max_mel_tokens = gr.Slider(
-                        label="Max Mel Tokens",
-                        value=1500,
-                        minimum=50,
-                        maximum=tts.cfg.gpt.max_mel_tokens,
-                        step=10,
-                        info=f"Maximum audio length in tokens. Model limit: {tts.cfg.gpt.max_mel_tokens} (~84s). Too small causes truncation. Default: 1500",
-                        key="max_mel_tokens"
-                    )
-                    # with gr.Row():
-                    #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="不建议使用")
-                    #     typical_mass = gr.Slider(label="typical_mass", value=0.9, minimum=0.0, maximum=1.0, step=0.1)
-                with gr.Column(scale=2):
-                    gr.Markdown(f'**Sentence Segmentation Settings** _Parameters affect audio quality and generation speed_')
-                    with gr.Row():
-                        with gr.Column():
-                            initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
-                            max_text_tokens_per_segment = gr.Slider(
-                                label="Max Tokens per Segment",
-                                value=initial_value,
-                                minimum=20,
-                                maximum=tts.cfg.gpt.max_text_tokens,
-                                step=2,
-                                key="max_text_tokens_per_segment",
-                                info=f"Text chunk size. Model limit: {tts.cfg.gpt.max_text_tokens}. Recommended: 80-200. Default: {initial_value}"
-                            )
-                        with gr.Column():
-                            low_memory_mode = gr.Checkbox(label="Low Memory Mode", value=False,
-                                                         info="Enable low memory mode for systems with limited GPU memory (inference will be slower)")
-                    with gr.Accordion("Preview Sentence Segmentation Results", open=True) as segments_settings:
-                        segments_preview = gr.Dataframe(
-                            headers=["Index", "Segment Content", "Token Count"],
-                            key="segments_preview",
-                            wrap=True,
-                        )
+                diffusion_steps = gr.Slider(
+                    label="Diffusion Steps",
+                    value=25,
+                    minimum=10,
+                    maximum=100,
+                    step=1,
+                    info="Number of denoising steps in the diffusion model. Higher = better quality but slower. Default: 25"
+                )
+                inference_cfg_rate = gr.Slider(
+                    label="CFG Rate (Classifier-Free Guidance)",
+                    value=0.7,
+                    minimum=0.0,
+                    maximum=2.0,
+                    step=0.05,
+                    info="Controls how strongly the model follows the voice, emotion, and style characteristics from reference audio. Higher values = stricter adherence to reference, lower = more variation. 0.0 = no guidance (random), 0.7 = balanced (default), >1.0 = very strong adherence to reference characteristics."
+                )
 
-        with gr.Accordion("Expert Diffusion & Audio Processing Settings", open=False) as expert_settings_group:
+            # Row 2: Enable Sampling and Temperature
             with gr.Row():
-                with gr.Column():
-                    gr.Markdown("**🔬 Diffusion Model Parameters**")
-                    diffusion_steps = gr.Slider(
-                        label="Diffusion Steps",
-                        value=25,
-                        minimum=10,
-                        maximum=100,
-                        step=1,
-                        info="Number of denoising steps in the diffusion model. Higher = better quality but slower. Default: 25"
-                    )
-                    inference_cfg_rate = gr.Slider(
-                        label="CFG Rate (Classifier-Free Guidance)",
-                        value=0.7,
-                        minimum=0.0,
-                        maximum=2.0,
-                        step=0.05,
-                        info="Controls how strongly the model follows the conditioning. 0 = no guidance, 1 = full guidance. Default: 0.7"
-                    )
-                    latent_multiplier = gr.Slider(
-                        label="Latent Length Multiplier",
-                        value=1.72,
-                        minimum=1.0,
-                        maximum=3.0,
-                        step=0.01,
-                        info="Multiplier for target audio length calculation. Affects speech pacing. Default: 1.72"
-                    )
-                with gr.Column():
-                    gr.Markdown("**🎵 Audio Processing Parameters**")
-                    interval_silence = gr.Slider(
-                        label="Silence Between Segments (ms)",
-                        value=200,
-                        minimum=0,
-                        maximum=1000,
-                        step=50,
-                        info="Milliseconds of silence inserted between text segments. Default: 200ms"
-                    )
-                    max_consecutive_silence = gr.Slider(
-                        label="Max Consecutive Silent Tokens (0=disabled)",
-                        value=0,
-                        minimum=0,
-                        maximum=100,
-                        step=5,
-                        info="Compress long silences in generated audio. 0=disabled (v2 default), 30=moderate (v1 style). Try 30 if output has long pauses."
-                    )
-                    mp3_bitrate = gr.Dropdown(
-                        label="MP3 Bitrate",
-                        choices=["128k", "192k", "256k", "320k"],
-                        value="256k",
-                        info="Audio quality for MP3 export. Higher = better quality, larger file. Default: 256k"
-                    )
+                do_sample = gr.Checkbox(
+                    label="Enable Sampling",
+                    value=True,
+                    info="When ON: Uses random sampling for natural, varied speech. When OFF: Always picks most likely tokens for consistent but potentially robotic output. Keep ON for natural speech."
+                )
+                temperature = gr.Slider(
+                    label="Temperature",
+                    minimum=0.1,
+                    maximum=2.0,
+                    value=0.8,
+                    step=0.1,
+                    info="Controls speech expressiveness. Higher (0.9-1.2) = more varied intonation and expression. Lower (0.3-0.7) = flatter but more stable speech. Default 0.8 is balanced."
+                )
 
+            # Row 3: Beam Search Beams and Max Tokens per Segment
             with gr.Row():
-                with gr.Column():
-                    gr.Markdown("**📊 Reference Audio Limits**")
-                    max_speaker_audio_length = gr.Slider(
-                        label="Max Speaker Reference Length (seconds)",
-                        value=15,
-                        minimum=3,
-                        maximum=30,
-                        step=1,
-                        info="Maximum speaker reference duration. Model works best with 5-15s. Max practical: 30s. Default: 15s"
-                    )
-                    max_emotion_audio_length = gr.Slider(
-                        label="Max Emotion Reference Length (seconds)",
-                        value=15,
-                        minimum=3,
-                        maximum=30,
-                        step=1,
-                        info="Maximum emotion reference duration. Model works best with 5-15s. Max practical: 30s. Default: 15s"
-                    )
-                with gr.Column():
-                    gr.Markdown("**🎯 Emotion Control Fine-tuning**")
-                    apply_emo_bias = gr.Checkbox(
-                        label="Apply Emotion Bias Correction",
-                        value=True,
-                        info="Apply automatic bias to prevent extreme emotion outputs. Recommended: ON"
-                    )
-                    max_emotion_sum = gr.Slider(
-                        label="Max Total Emotion Strength",
-                        value=0.8,
-                        minimum=0.1,
-                        maximum=2.0,
-                        step=0.05,
-                        info="Maximum sum of all emotion vectors. Prevents over-emotional speech. Default: 0.8"
-                    )
-                    autoregressive_batch_size = gr.Slider(
-                        label="Autoregressive Batch Size",
-                        value=1,
-                        minimum=1,
-                        maximum=4,
-                        step=1,
-                        info="Batch size for autoregressive generation. Higher may improve diversity. Default: 1"
-                    )
+                num_beams = gr.Slider(
+                    label="Beam Search Beams",
+                    value=3,
+                    minimum=1,
+                    maximum=10,
+                    step=1,
+                    info="Explores multiple generation paths simultaneously. Higher (5-10) = better quality but slower. Lower (1-3) = faster but potentially worse quality. Default 3 balances speed and quality."
+                )
+                initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
+                max_text_tokens_per_segment = gr.Slider(
+                    label="Max Tokens per Segment",
+                    value=initial_value,
+                    minimum=20,
+                    maximum=tts.cfg.gpt.max_text_tokens,
+                    step=2,
+                    key="max_text_tokens_per_segment",
+                    info=f"Splits long text into chunks for processing. Smaller (80-120) = more natural pauses and consistent quality but slower. Larger (150-200) = faster but may have quality variations. Model limit: {tts.cfg.gpt.max_text_tokens}. Default: {initial_value}"
+                )
 
-            advanced_params = [
-                do_sample, top_p, top_k, temperature,
-                length_penalty, num_beams, repetition_penalty, max_mel_tokens,
-                low_memory_mode,
-                # typical_sampling, typical_mass,
-            ]
-
-            expert_params = [
-                diffusion_steps, inference_cfg_rate, interval_silence,
-                max_speaker_audio_length, max_emotion_audio_length,
-                autoregressive_batch_size, apply_emo_bias, max_emotion_sum,
-                latent_multiplier, max_consecutive_silence, mp3_bitrate
-            ]
-
-        with gr.Accordion("🧠 Advanced Model Architecture Settings (Expert Only!)", open=False) as model_settings_group:
-            gr.Markdown("⚠️ **WARNING**: These settings directly affect model internals. Only change if you understand the architecture!")
+            # Row 4: Save as MP3 and Low Memory Mode
             with gr.Row():
-                with gr.Column():
-                    semantic_layer = gr.Slider(
-                        label="Semantic Feature Extraction Layer",
-                        value=17,
-                        minimum=10,
-                        maximum=23,
-                        step=1,
-                        info="Which w2v-bert-2.0 transformer layer to extract features from. Layer 17 is optimal. Default: 17"
-                    )
-                    cfm_cache_length = gr.Slider(
-                        label="CFM Max Cache Sequence Length",
-                        value=8192,
-                        minimum=2048,
-                        maximum=16384,
-                        step=512,
-                        info="Maximum sequence length for CFM model cache. Higher = more VRAM usage. Default: 8192"
-                    )
-                with gr.Column():
-                    gr.Markdown("**🎛️ Custom Emotion Bias Weights**")
-                    gr.Markdown("Adjust individual emotion biases (advanced users only):")
-                    with gr.Row():
-                        emo_biases = [
-                            gr.Slider(label="Joy", value=0.9375, minimum=0.5, maximum=1.5, step=0.0625),
-                            gr.Slider(label="Anger", value=0.875, minimum=0.5, maximum=1.5, step=0.0625),
-                            gr.Slider(label="Sad", value=1.0, minimum=0.5, maximum=1.5, step=0.0625),
-                            gr.Slider(label="Fear", value=1.0, minimum=0.5, maximum=1.5, step=0.0625),
-                        ]
-                    with gr.Row():
-                        emo_biases.extend([
-                            gr.Slider(label="Disgust", value=0.9375, minimum=0.5, maximum=1.5, step=0.0625),
-                            gr.Slider(label="Depression", value=0.9375, minimum=0.5, maximum=1.5, step=0.0625),
-                            gr.Slider(label="Surprise", value=0.6875, minimum=0.5, maximum=1.5, step=0.0625),
-                            gr.Slider(label="Calm", value=0.5625, minimum=0.5, maximum=1.5, step=0.0625),
-                        ])
+                save_as_mp3 = gr.Checkbox(
+                    label="Save as MP3",
+                    value=False,
+                    visible=MP3_AVAILABLE,
+                    info="Save audio as MP3 format instead of WAV" if MP3_AVAILABLE else "Requires pydub: pip install pydub"
+                )
+                low_memory_mode = gr.Checkbox(
+                    label="Low Memory Mode",
+                    value=False,
+                    info="Enable low memory mode for systems with limited GPU memory (inference will be slower)"
+                )
 
-            model_params = [semantic_layer, cfm_cache_length, *emo_biases]
+        with gr.Accordion("Preview Sentence Segmentation Results", open=True) as segments_settings:
+            segments_preview = gr.Dataframe(
+                headers=["Index", "Segment Content", "Token Count"],
+                key="segments_preview",
+                wrap=True,
+            )
 
+    with gr.Tab("Advanced Parameters"):
+        gr.Markdown("### 🎯 Advanced Audio Generation Parameters")
+        gr.Markdown("_Fine-tune generation parameters for expert control over audio synthesis._")
 
+        with gr.Row():
+            with gr.Column():
+                mp3_bitrate = gr.Dropdown(
+                    label="MP3 Bitrate",
+                    choices=["128k", "192k", "256k", "320k"],
+                    value="256k",
+                    info="Audio quality when saving as MP3. 128k = smaller files but lower quality. 320k = best quality but larger files. 256k = good balance for most uses."
+                )
+            with gr.Column():
+                latent_multiplier = gr.Slider(
+                    label="Latent Length Multiplier",
+                    value=1.72,
+                    minimum=1.0,
+                    maximum=3.0,
+                    step=0.01,
+                    info="Controls speech pacing speed. Higher (2.0-3.0) = slower, more stretched speech. Lower (1.0-1.5) = faster, more compressed speech. Default 1.72 is natural pacing."
+                )
+
+        with gr.Row():
+            with gr.Column():
+                top_p = gr.Slider(
+                    label="Top-p (Nucleus Sampling)",
+                    minimum=0.0,
+                    maximum=1.0,
+                    value=0.8,
+                    step=0.01,
+                    info="Limits token selection to most probable options. Higher (0.9-1.0) = more varied and expressive speech. Lower (0.3-0.7) = more predictable, conservative speech. Default 0.8 balances variety and stability."
+                )
+            with gr.Column():
+                top_k = gr.Slider(
+                    label="Top-k",
+                    minimum=0,
+                    maximum=100,
+                    value=30,
+                    step=1,
+                    info="Limits selection to k most probable tokens. Higher (50-100) = more speech variety. Lower (10-30) = more consistent speech. 0 = disabled. Default 30 avoids unlikely tokens while maintaining variety."
+                )
+
+        with gr.Row():
+            with gr.Column():
+                repetition_penalty = gr.Number(
+                    label="Repetition Penalty",
+                    precision=None,
+                    value=10.0,
+                    minimum=1.0,
+                    maximum=20.0,
+                    step=0.1,
+                    info="Prevents speech from getting stuck in loops. Higher (10-15) = strongly avoids repetition. Lower (1-5) = allows natural repetition. Default 10.0 effectively prevents stuttering."
+                )
+            with gr.Column():
+                length_penalty = gr.Number(
+                    label="Length Penalty",
+                    precision=None,
+                    value=0.0,
+                    minimum=-2.0,
+                    maximum=2.0,
+                    step=0.1,
+                    info="Influences speech segment length. Positive (0.5-2.0) = longer segments. Negative (-2.0 to -0.5) = shorter segments. Zero = natural length based on content."
+                )
+
+        with gr.Row():
+            with gr.Column():
+                max_consecutive_silence = gr.Slider(
+                    label="Max Consecutive Silent Tokens (0=disabled)",
+                    value=0,
+                    minimum=0,
+                    maximum=100,
+                    step=5,
+                    info="Removes long pauses in speech. Higher (30-50) = allows longer natural pauses. Lower (5-20) = tighter, more continuous speech. 0 = no pause removal. Try 30 if output has awkward long silences."
+                )
+            with gr.Column():
+                interval_silence = gr.Slider(
+                    label="Silence Between Segments (ms)",
+                    value=200,
+                    minimum=0,
+                    maximum=1000,
+                    step=50,
+                    info="Pause length between text segments. Higher (500-1000ms) = formal presentation style with clear breaks. Lower (50-200ms) = conversational flow. Default 200ms is natural for most content."
+                )
+
+        gr.Markdown("### 📊 Reference Audio Processing Limits")
+        with gr.Row():
+            with gr.Column():
+                max_speaker_audio_length = gr.Slider(
+                    label="Max Speaker Reference Length (seconds)",
+                    value=15,
+                    minimum=3,
+                    maximum=30,
+                    step=1,
+                    info="How much of the speaker reference audio to use. Model works best with 5-15 seconds. Longer clips may not improve quality. Default: 15s"
+                )
+            with gr.Column():
+                max_emotion_audio_length = gr.Slider(
+                    label="Max Emotion Reference Length (seconds)",
+                    value=15,
+                    minimum=3,
+                    maximum=30,
+                    step=1,
+                    info="How much of the emotion reference audio to use. Model works best with 5-15 seconds. Longer clips may not improve emotion capture. Default: 15s"
+                )
+
+        gr.Markdown("### 🎯 Emotion Control Parameters")
+        with gr.Row():
+            with gr.Column():
+                apply_emo_bias = gr.Checkbox(
+                    label="Apply Emotion Bias Correction",
+                    value=True,
+                    info="Prevents emotions from becoming too extreme or unnatural. Keeps emotional expression balanced and realistic. Recommended: Keep ON."
+                )
+            with gr.Column():
+                max_emotion_sum = gr.Slider(
+                    label="Max Total Emotion Strength",
+                    value=0.8,
+                    minimum=0.1,
+                    maximum=2.0,
+                    step=0.05,
+                    info="Limits overall emotional intensity. Higher (1.0-2.0) = stronger emotions allowed. Lower (0.3-0.7) = more subtle emotions. Default 0.8 keeps emotions natural."
+                )
+
+        with gr.Row():
+            with gr.Column():
+                autoregressive_batch_size = gr.Slider(
+                    label="Autoregressive Batch Size",
+                    value=1,
+                    minimum=1,
+                    maximum=8,
+                    step=1,
+                    info="Generates multiple speech variations simultaneously. Higher (3-8) = more options, potentially better quality but much slower. 1 = single fast generation."
+                )
+            with gr.Column():
+                max_mel_tokens = gr.Slider(
+                    label="Max Mel Tokens",
+                    value=1500,
+                    minimum=50,
+                    maximum=1815,
+                    step=10,
+                    info=f"Maximum speech length per segment. 1815 tokens ≈ 84 seconds. Lower values may cut off long segments. Default 1500 works for most content.",
+                    key="max_mel_tokens"
+                )
+
+        gr.Markdown("### 🧠 Advanced Model Architecture Settings (Expert Only!)")
+        gr.Markdown("⚠️ **WARNING**: These settings directly affect model internals. Only change if you understand the architecture!")
+
+        with gr.Row():
+            with gr.Column():
+                semantic_layer = gr.Slider(
+                    label="Semantic Feature Extraction Layer",
+                    value=17,
+                    minimum=1,
+                    maximum=24,
+                    step=1,
+                    info="Which layer of the semantic model to use. Higher layers (15-20) = more expressive, emotion-aware speech. Lower layers (5-12) = clearer pronunciation. Default 17 balances both."
+                )
+            with gr.Column():
+                cfm_cache_length = gr.Slider(
+                    label="CFM Max Cache Sequence Length",
+                    value=8192,
+                    minimum=1024,
+                    maximum=16384,
+                    step=512,
+                    info="Memory allocation for processing speech. Higher (12000-16000) = handles longer segments better but uses more VRAM. Lower (4000-8000) = less memory usage. Default 8192 works for most."
+                )
+
+        gr.Markdown("### 🎛️ Custom Emotion Bias Weights")
+        gr.Markdown("Fine-tune individual emotion channel biases in normalize_emo_vec() when Apply Emotion Bias is enabled:")
+        with gr.Row():
+            emo_bias_joy = gr.Slider(label="Joy Bias", value=0.9375, minimum=0.5, maximum=1.5, step=0.0625,
+                                     info="Adjusts how much joy/happiness is expressed. <1.0 = less joyful, >1.0 = more joyful")
+            emo_bias_anger = gr.Slider(label="Anger Bias", value=0.875, minimum=0.5, maximum=1.5, step=0.0625,
+                                       info="Adjusts anger intensity. <1.0 = less angry, >1.0 = more angry")
+            emo_bias_sad = gr.Slider(label="Sadness Bias", value=1.0, minimum=0.5, maximum=1.5, step=0.0625,
+                                     info="Adjusts sadness expression. <1.0 = less sad, >1.0 = more sad")
+            emo_bias_fear = gr.Slider(label="Fear Bias", value=1.0, minimum=0.5, maximum=1.5, step=0.0625,
+                                      info="Adjusts fear/anxiety expression. <1.0 = less fearful, >1.0 = more fearful")
+        with gr.Row():
+            emo_bias_disgust = gr.Slider(label="Disgust Bias", value=0.9375, minimum=0.5, maximum=1.5, step=0.0625,
+                                         info="Adjusts disgust expression. <1.0 = less disgusted, >1.0 = more disgusted")
+            emo_bias_depression = gr.Slider(label="Depression Bias", value=0.9375, minimum=0.5, maximum=1.5, step=0.0625,
+                                           info="Adjusts melancholic/depressed tone. <1.0 = less depressed, >1.0 = more depressed")
+            emo_bias_surprise = gr.Slider(label="Surprise Bias", value=0.6875, minimum=0.5, maximum=1.5, step=0.0625,
+                                          info="Adjusts surprise/amazement expression. <1.0 = less surprised, >1.0 = more surprised")
+            emo_bias_calm = gr.Slider(label="Calm Bias", value=0.5625, minimum=0.5, maximum=1.5, step=0.0625,
+                                      info="Adjusts calm/neutral tone. <1.0 = less calm, >1.0 = more calm and peaceful")
+
+        # Define parameter lists for function calls
+        advanced_params = [
+            do_sample, top_p, top_k, temperature,
+            length_penalty, num_beams, repetition_penalty, max_mel_tokens,
+            low_memory_mode,
+        ]
+
+        expert_params = [
+            diffusion_steps, inference_cfg_rate, interval_silence,
+            max_speaker_audio_length, max_emotion_audio_length,
+            autoregressive_batch_size, apply_emo_bias, max_emotion_sum,
+            latent_multiplier, max_consecutive_silence, mp3_bitrate
+        ]
+
+        model_params = [semantic_layer, cfm_cache_length,
+                       emo_bias_joy, emo_bias_anger, emo_bias_sad, emo_bias_fear,
+                       emo_bias_disgust, emo_bias_depression, emo_bias_surprise, emo_bias_calm]
 
     def on_input_text_change(text, max_text_tokens_per_segment):
         if text and len(text) > 0:
