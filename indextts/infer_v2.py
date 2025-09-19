@@ -242,6 +242,7 @@ class IndexTTS2:
             print(">> S2Mel loaded to CPU (hybrid mode)")
         else:
             self.s2mel = s2mel.to(self.device)
+        # Default cache setup - can be overridden in infer()
         self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
         self.s2mel.eval()
         print(">> s2mel weights restored from:", s2mel_path)
@@ -303,7 +304,7 @@ class IndexTTS2:
         print(">> All models loaded successfully!")
 
     @torch.no_grad()
-    def get_emb(self, input_features, attention_mask):
+    def get_emb(self, input_features, attention_mask, semantic_layer=17):
         # Move semantic model to device if in hybrid mode
         if self.hybrid_model_device:
             self.semantic_model = self.semantic_model.to(self.device)
@@ -315,7 +316,7 @@ class IndexTTS2:
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
-        feat = vq_emb.hidden_states[17]  # (B, T, C)
+        feat = vq_emb.hidden_states[semantic_layer]  # (B, T, C)
         feat = (feat - self.semantic_mean) / self.semantic_std
 
         # Move back to CPU if in hybrid mode
@@ -425,12 +426,15 @@ class IndexTTS2:
             audio = audio[:, :max_audio_samples]
         return audio, sr
     
-    def normalize_emo_vec(self, emo_vector, apply_bias=True, max_emotion_sum=0.8):
+    def normalize_emo_vec(self, emo_vector, apply_bias=True, max_emotion_sum=0.8, custom_biases=None):
         # apply biased emotion factors for better user experience,
         # by de-emphasizing emotions that can cause strange results
         if apply_bias:
             # [happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]
-            emo_bias = [0.9375, 0.875, 1.0, 1.0, 0.9375, 0.9375, 0.6875, 0.5625]
+            if custom_biases:
+                emo_bias = custom_biases
+            else:
+                emo_bias = [0.9375, 0.875, 1.0, 1.0, 0.9375, 0.9375, 0.6875, 0.5625]
             emo_vector = [vec * bias for vec, bias in zip(emo_vector, emo_bias)]
 
         # the total emotion sum must be max_emotion_sum or less
@@ -481,7 +485,8 @@ class IndexTTS2:
               diffusion_steps=25, inference_cfg_rate=0.7,
               max_speaker_audio_length=15, max_emotion_audio_length=15,
               autoregressive_batch_size=1, max_emotion_sum=0.8,
-              latent_multiplier=1.72, max_consecutive_silence=30,
+              latent_multiplier=1.72, max_consecutive_silence=0,
+              semantic_layer=17, cfm_cache_length=8192,
               **generation_kwargs):
         # Load models on first use
         if not self.models_loaded:
@@ -563,7 +568,7 @@ class IndexTTS2:
             attention_mask = inputs["attention_mask"]
             input_features = input_features.to(self.device)
             attention_mask = attention_mask.to(self.device)
-            spk_cond_emb = self.get_emb(input_features, attention_mask)
+            spk_cond_emb = self.get_emb(input_features, attention_mask, semantic_layer)
 
             # Move semantic_codec to device if in hybrid mode
             if self.hybrid_model_device:
@@ -643,7 +648,7 @@ class IndexTTS2:
             emo_attention_mask = emo_inputs["attention_mask"]
             emo_input_features = emo_input_features.to(self.device)
             emo_attention_mask = emo_attention_mask.to(self.device)
-            emo_cond_emb = self.get_emb(emo_input_features, emo_attention_mask)
+            emo_cond_emb = self.get_emb(emo_input_features, emo_attention_mask, semantic_layer)
 
             self.cache_emo_cond = emo_cond_emb
             self.cache_emo_audio_prompt = emo_audio_prompt
@@ -756,6 +761,13 @@ class IndexTTS2:
                 codes = codes[:, :code_len]
                 code_lens = torch.LongTensor(code_lens)
                 code_lens = code_lens.to(self.device)
+
+                # Optional: Remove long consecutive silences (if max_consecutive_silence > 0)
+                if max_consecutive_silence > 0:
+                    codes, code_lens = self.remove_long_silence(codes, silent_token=52, max_consecutive=max_consecutive_silence)
+                    if verbose:
+                        print(f"Applied silence removal with max_consecutive={max_consecutive_silence}")
+
                 if verbose:
                     print(codes, type(codes))
                     print(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
@@ -794,6 +806,11 @@ class IndexTTS2:
                         self.s2mel = self.s2mel.to(self.device)
                         self.semantic_codec = self.semantic_codec.to(self.device)
                         print(">> [Hybrid] S2Mel and semantic_codec moved to device")
+
+                    # Update CFM cache if needed (only if different from current setting)
+                    if hasattr(self.s2mel.models['cfm'].estimator, '_cached_seq_length'):
+                        if self.s2mel.models['cfm'].estimator._cached_seq_length != cfm_cache_length:
+                            self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=cfm_cache_length)
 
                     latent = self.s2mel.models['gpt_layer'](latent)
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))

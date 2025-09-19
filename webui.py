@@ -179,6 +179,17 @@ def gen_single(emo_control_method,prompt, text,
                repetition_penalty,
                max_mel_tokens,
                low_memory_mode,
+               # Model params (semantic layer, cache, emotion biases)
+               semantic_layer,
+               cfm_cache_length,
+               emo_bias_joy,
+               emo_bias_anger,
+               emo_bias_sad,
+               emo_bias_fear,
+               emo_bias_disgust,
+               emo_bias_depression,
+               emo_bias_surprise,
+               emo_bias_calm,
                progress=gr.Progress()):
     # Generate output path with sequential numbering
     temp_wav_path = generate_output_path(save_as_mp3=False)  # Always generate WAV first
@@ -209,7 +220,11 @@ def gen_single(emo_control_method,prompt, text,
         pass
     if emo_control_method == 2:  # emotion from custom vectors
         vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-        vec = tts.normalize_emo_vec(vec, apply_bias=apply_emo_bias, max_emotion_sum=max_emotion_sum)
+        # Use custom emotion biases if provided
+        custom_emo_biases = [emo_bias_joy, emo_bias_anger, emo_bias_sad, emo_bias_fear,
+                            emo_bias_disgust, emo_bias_depression, emo_bias_surprise, emo_bias_calm]
+        vec = tts.normalize_emo_vec(vec, apply_bias=apply_emo_bias, max_emotion_sum=max_emotion_sum,
+                                   custom_biases=custom_emo_biases if apply_emo_bias else None)
     else:
         # don't use the emotion vector inputs for the other modes
         vec = None
@@ -237,6 +252,8 @@ def gen_single(emo_control_method,prompt, text,
                        max_emotion_sum=float(max_emotion_sum),
                        latent_multiplier=float(latent_multiplier),
                        max_consecutive_silence=int(max_consecutive_silence),
+                       semantic_layer=int(semantic_layer),
+                       cfm_cache_length=int(cfm_cache_length),
                        **kwargs)
 
     # Convert to MP3 if requested
@@ -406,7 +423,15 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                         save_as_mp3 = gr.Checkbox(label="Save as MP3", value=False,
                                                   visible=MP3_AVAILABLE,
                                                   info="Save audio as MP3 format instead of WAV" if MP3_AVAILABLE else "Requires pydub: pip install pydub")
-                    max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info="Maximum number of generated tokens. Too small will cause audio truncation", key="max_mel_tokens")
+                    max_mel_tokens = gr.Slider(
+                        label="Max Mel Tokens",
+                        value=1500,
+                        minimum=50,
+                        maximum=tts.cfg.gpt.max_mel_tokens,
+                        step=10,
+                        info=f"Maximum audio length in tokens. Model limit: {tts.cfg.gpt.max_mel_tokens} (~84s). Too small causes truncation. Default: 1500",
+                        key="max_mel_tokens"
+                    )
                     # with gr.Row():
                     #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="不建议使用")
                     #     typical_mass = gr.Slider(label="typical_mass", value=0.9, minimum=0.0, maximum=1.0, step=0.1)
@@ -416,8 +441,13 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                         with gr.Column():
                             initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
                             max_text_tokens_per_segment = gr.Slider(
-                                label="Max Tokens per Segment", value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
-                                info="Recommended range: 80-200. Larger values = longer segments; smaller values = more fragmented. Too small or too large may reduce audio quality",
+                                label="Max Tokens per Segment",
+                                value=initial_value,
+                                minimum=20,
+                                maximum=tts.cfg.gpt.max_text_tokens,
+                                step=2,
+                                key="max_text_tokens_per_segment",
+                                info=f"Text chunk size. Model limit: {tts.cfg.gpt.max_text_tokens}. Recommended: 80-200. Default: {initial_value}"
                             )
                         with gr.Column():
                             low_memory_mode = gr.Checkbox(label="Low Memory Mode", value=False,
@@ -468,12 +498,12 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                         info="Milliseconds of silence inserted between text segments. Default: 200ms"
                     )
                     max_consecutive_silence = gr.Slider(
-                        label="Max Consecutive Silent Tokens",
-                        value=30,
-                        minimum=10,
+                        label="Max Consecutive Silent Tokens (0=disabled)",
+                        value=0,
+                        minimum=0,
                         maximum=100,
                         step=5,
-                        info="Maximum allowed consecutive silent tokens before compression. Reduces long pauses. Default: 30"
+                        info="Compress long silences in generated audio. 0=disabled (v2 default), 30=moderate (v1 style). Try 30 if output has long pauses."
                     )
                     mp3_bitrate = gr.Dropdown(
                         label="MP3 Bitrate",
@@ -488,18 +518,18 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                     max_speaker_audio_length = gr.Slider(
                         label="Max Speaker Reference Length (seconds)",
                         value=15,
-                        minimum=5,
-                        maximum=60,
+                        minimum=3,
+                        maximum=30,
                         step=1,
-                        info="Maximum duration for speaker reference audio. Longer clips will be truncated. Default: 15s"
+                        info="Maximum speaker reference duration. Model works best with 5-15s. Max practical: 30s. Default: 15s"
                     )
                     max_emotion_audio_length = gr.Slider(
                         label="Max Emotion Reference Length (seconds)",
                         value=15,
-                        minimum=5,
-                        maximum=60,
+                        minimum=3,
+                        maximum=30,
                         step=1,
-                        info="Maximum duration for emotion reference audio. Longer clips will be truncated. Default: 15s"
+                        info="Maximum emotion reference duration. Model works best with 5-15s. Max practical: 30s. Default: 15s"
                     )
                 with gr.Column():
                     gr.Markdown("**🎯 Emotion Control Fine-tuning**")
@@ -538,6 +568,46 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                 autoregressive_batch_size, apply_emo_bias, max_emotion_sum,
                 latent_multiplier, max_consecutive_silence, mp3_bitrate
             ]
+
+        with gr.Accordion("🧠 Advanced Model Architecture Settings (Expert Only!)", open=False) as model_settings_group:
+            gr.Markdown("⚠️ **WARNING**: These settings directly affect model internals. Only change if you understand the architecture!")
+            with gr.Row():
+                with gr.Column():
+                    semantic_layer = gr.Slider(
+                        label="Semantic Feature Extraction Layer",
+                        value=17,
+                        minimum=10,
+                        maximum=23,
+                        step=1,
+                        info="Which w2v-bert-2.0 transformer layer to extract features from. Layer 17 is optimal. Default: 17"
+                    )
+                    cfm_cache_length = gr.Slider(
+                        label="CFM Max Cache Sequence Length",
+                        value=8192,
+                        minimum=2048,
+                        maximum=16384,
+                        step=512,
+                        info="Maximum sequence length for CFM model cache. Higher = more VRAM usage. Default: 8192"
+                    )
+                with gr.Column():
+                    gr.Markdown("**🎛️ Custom Emotion Bias Weights**")
+                    gr.Markdown("Adjust individual emotion biases (advanced users only):")
+                    with gr.Row():
+                        emo_biases = [
+                            gr.Slider(label="Joy", value=0.9375, minimum=0.5, maximum=1.5, step=0.0625),
+                            gr.Slider(label="Anger", value=0.875, minimum=0.5, maximum=1.5, step=0.0625),
+                            gr.Slider(label="Sad", value=1.0, minimum=0.5, maximum=1.5, step=0.0625),
+                            gr.Slider(label="Fear", value=1.0, minimum=0.5, maximum=1.5, step=0.0625),
+                        ]
+                    with gr.Row():
+                        emo_biases.extend([
+                            gr.Slider(label="Disgust", value=0.9375, minimum=0.5, maximum=1.5, step=0.0625),
+                            gr.Slider(label="Depression", value=0.9375, minimum=0.5, maximum=1.5, step=0.0625),
+                            gr.Slider(label="Surprise", value=0.6875, minimum=0.5, maximum=1.5, step=0.0625),
+                            gr.Slider(label="Calm", value=0.5625, minimum=0.5, maximum=1.5, step=0.0625),
+                        ])
+
+            model_params = [semantic_layer, cfm_cache_length, *emo_biases]
 
 
 
@@ -624,6 +694,7 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                              save_as_mp3,
                              *expert_params,
                              *advanced_params,
+                             *model_params,
                      ],
                      outputs=[output_audio])
 
