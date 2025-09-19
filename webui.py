@@ -255,13 +255,17 @@ def gen_single(emo_control_method,prompt, text,
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
 
     # Ensure max_text_tokens_per_segment is within valid range
-    try:
-        max_tokens = int(max_text_tokens_per_segment) if max_text_tokens_per_segment else 120
-        # Clamp to valid range
-        max_tokens = max(20, min(max_tokens, tts.cfg.gpt.max_text_tokens))
-    except (ValueError, TypeError):
-        # Use default if conversion fails
+    # Handle all input types gracefully
+    if max_text_tokens_per_segment is None:
         max_tokens = 120
+    else:
+        try:
+            # Convert to int and clamp to valid range
+            max_tokens = int(float(max_text_tokens_per_segment))
+            max_tokens = max(20, min(max_tokens, tts.cfg.gpt.max_text_tokens))
+        except (ValueError, TypeError):
+            # Use default if conversion fails
+            max_tokens = 120
 
     # Pass new parameters to infer
     output = tts.infer(spk_audio_prompt=prompt, text=text,
@@ -456,12 +460,12 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
                     info="Explores multiple generation paths simultaneously. Higher (5-10) = better quality but slower. Lower (1-3) = faster but potentially worse quality. Default 3 balances speed and quality."
                 )
                 initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
-                max_text_tokens_per_segment = gr.Number(
+                max_text_tokens_per_segment = gr.Slider(
                     label="Max Tokens per Segment",
                     value=initial_value,
                     minimum=20,
                     maximum=tts.cfg.gpt.max_text_tokens,
-                    precision=0,
+                    step=1,
                     key="max_text_tokens_per_segment",
                     info=f"Splits long text into chunks for processing. Smaller (80-120) = more natural pauses and consistent quality but slower. Larger (150-200) = faster but may have quality variations. Model limit: {tts.cfg.gpt.max_text_tokens}. Default: {initial_value}"
                 )
@@ -676,13 +680,16 @@ with gr.Blocks(title="SECourses IndexTTS2 Premium App", theme=theme) as demo:
         if text and len(text) > 0:
             # Ensure max_text_tokens_per_segment is within valid range
             # This prevents errors when users are typing values
-            try:
-                max_tokens = int(max_text_tokens_per_segment) if max_text_tokens_per_segment else 120
-                # Clamp to valid range
-                max_tokens = max(20, min(max_tokens, tts.cfg.gpt.max_text_tokens))
-            except (ValueError, TypeError):
-                # Use default if conversion fails
+            if max_text_tokens_per_segment is None:
                 max_tokens = 120
+            else:
+                try:
+                    # Convert to int and clamp to valid range
+                    max_tokens = int(float(max_text_tokens_per_segment))
+                    max_tokens = max(20, min(max_tokens, tts.cfg.gpt.max_text_tokens))
+                except (ValueError, TypeError):
+                    # Use default if conversion fails
+                    max_tokens = 120
 
             text_tokens_list = tts.tokenizer.tokenize(text)
 
